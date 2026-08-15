@@ -4,6 +4,7 @@ import express from "express";
 import {logger} from "./middleware/logger";
 import {notFound} from "./middleware/notFound";
 import {errorHandler} from "./middleware/errorHandler";
+import healthRoutes from "./routes/health.route";
 import deploymentRoutes from "./routes/deployment.route";
 
 const app = express();
@@ -11,16 +12,9 @@ const app = express();
 app.use(logger);
 app.use(express.json());
 app.use("/api/v1/deployments", deploymentRoutes);
-
-app.get("/health",(req,res)=>{
-    res.status(200).json({
-        status: "OK!",
-        message:"Backend running 👌",
-    });
-});
+app.use("/health", healthRoutes);
 
 app.use(notFound);
 app.use(errorHandler);
 
 export default app;
-

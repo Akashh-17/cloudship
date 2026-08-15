@@ -1,0 +1,9 @@
+export enum DeploymentStatus {
+    QUEUED = "QUEUED",
+    CLONING = "CLONING",
+    INSTALLING = "INSTALLING",
+    BUILDING = "BUILDING",
+    UPLOADING = "UPLOADING",
+    SUCCESS = "SUCCESS",
+    FAILED = "FAILED",
+}

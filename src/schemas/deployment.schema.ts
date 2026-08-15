@@ -1,12 +1,13 @@
 import { z } from "zod";
 
 export const deploymentSchema = z.object({
-  repoUrl: z.string().url("Must be a valid URL"),
-  // Easily extendable later:
-  // branch: z.string().optional(),
-  // commit: z.string().optional(),
-  // framework: z.string().optional(),
-  // buildCommand: z.string().optional(),
+  repoUrl: z
+    .string()
+    .url("Repository URL must be a valid URL")
+    .refine(
+      (url) => url.startsWith("https://github.com/"),
+      "Only GitHub repositories are supported"
+    ),
 });
 
-export type DeploymentSchema = z.infer<typeof deploymentSchema>;
+export type DeploymentInput = z.infer<typeof deploymentSchema>;
