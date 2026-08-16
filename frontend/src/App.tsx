@@ -118,7 +118,7 @@ export default function App() {
 
             {activeDeployment.status === "SUCCESS" && (
               <a
-                href={cloudshipApi.getSiteUrl(activeDeployment.id)}
+                href={cloudshipApi.getSiteUrl(activeDeployment.id, activeDeployment.liveUrl)}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="btn-visit"
@@ -173,7 +173,7 @@ export default function App() {
                   <td>
                     {d.status === "SUCCESS" ? (
                       <a
-                        href={cloudshipApi.getSiteUrl(d.id)}
+                        href={cloudshipApi.getSiteUrl(d.id, d.liveUrl)}
                         target="_blank"
                         rel="noopener noreferrer"
                         style={{ color: "#10b981", fontWeight: 600, textDecoration: "none" }}

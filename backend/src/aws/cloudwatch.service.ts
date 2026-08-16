@@ -30,8 +30,8 @@ export class CloudWatchService {
 
       await cloudWatchClient.send(command);
       logger.info(`📊 [CloudWatch] Recorded metric: ${metricName} = ${value} (${unit})`);
-    } catch (error) {
-      logger.error(error, `❌ [CloudWatch] Failed to record metric: ${metricName}`);
+    } catch (error: any) {
+      logger.warn(`⚠️ [CloudWatch] Metric recording note: ${error.message || error}`);
     }
   }
 

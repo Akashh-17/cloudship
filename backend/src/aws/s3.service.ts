@@ -68,12 +68,13 @@ export class S3Service {
     }
   }
 
-  getPublicUrl(deploymentId: string, filename: string): string {
-    const key = `deployments/${deploymentId}/${filename.replace(/^\/+/, "")}`;
+  getPublicUrl(deploymentId: string, filename: string = ""): string {
     if (env.CLOUDFRONT_DOMAIN) {
+      const key = `deployments/${deploymentId}/${filename.replace(/^\/+/, "")}`;
       return `https://${env.CLOUDFRONT_DOMAIN}/${key}`;
     }
-    return `https://${this.bucketName}.s3.${env.AWS_REGION}.amazonaws.com/${key}`;
+    const baseUrl = process.env.PUBLIC_API_URL || "http://localhost:3000";
+    return `${baseUrl.replace(/\/+$/, "")}/sites/${deploymentId}`;
   }
 
   async uploadDeploymentBundle(

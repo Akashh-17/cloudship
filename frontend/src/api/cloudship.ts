@@ -12,6 +12,7 @@ export interface Deployment {
     | "UPLOADING"
     | "SUCCESS"
     | "FAILED";
+  liveUrl?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -51,7 +52,8 @@ export const cloudshipApi = {
   getDeploymentStatus: (id: string): Promise<Deployment> =>
     request<Deployment>(`/api/v1/deployments/${id}`),
 
-  getSiteUrl: (id: string): string => {
-    return `${S3_BUCKET}/deployments/${id}/index.html`;
+  getSiteUrl: (id: string, liveUrl?: string): string => {
+    if (liveUrl) return liveUrl;
+    return `${BASE_URL}/sites/${id}`;
   },
 };

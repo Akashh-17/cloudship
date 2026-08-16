@@ -79,8 +79,8 @@ export class SQSService {
       await sqsClient.send(command);
       logger.info(`⏱️ [SQS] Heartbeat: Extended visibility timeout by ${visibilityTimeoutSeconds}s`);
       return true;
-    } catch (error) {
-      logger.error(error, "❌ Error changing message visibility in SQS");
+    } catch (error: any) {
+      logger.warn(`⚠️ [SQS] Heartbeat visibility ping note: ${error.message || error}`);
       return false;
     }
   }
