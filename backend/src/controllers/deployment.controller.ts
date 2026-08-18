@@ -11,7 +11,7 @@ export const listDeployments = asyncHandler(async (req: Request, res: Response) 
 });
 
 export const createDeployment = asyncHandler(async (req: Request, res: Response) => {
-  const result = await deploymentService.createDeployment(req.body.repoUrl);
+  const result = await deploymentService.createDeployment(req.body);
   res.json(success(result));
 });
 

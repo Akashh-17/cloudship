@@ -8,6 +8,10 @@ export const deploymentSchema = z.object({
       (url) => url.startsWith("https://github.com/"),
       "Only GitHub repositories are supported"
     ),
+  branch: z.string().optional().default("main"),
+  frontendDir: z.string().optional().default("./"),
+  customSlug: z.string().optional(),
+  envVars: z.record(z.string(), z.string()).optional(),
 });
 
 export type DeploymentInput = z.infer<typeof deploymentSchema>;

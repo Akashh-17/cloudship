@@ -14,6 +14,10 @@ import { AppError } from "../utils/AppError";
 export interface DeploymentJobPayload {
   deploymentId: string;
   repoUrl: string;
+  branch?: string;
+  frontendDir?: string;
+  customSlug?: string;
+  envVars?: Record<string, string>;
 }
 
 export class SQSService {

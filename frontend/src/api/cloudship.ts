@@ -1,9 +1,12 @@
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:3000";
-const S3_BUCKET = import.meta.env.VITE_S3_BUCKET_URL || "https://cloudship-deployments-bucket-397745288187.s3.ap-south-1.amazonaws.com";
 
 export interface Deployment {
   id: string;
   repoUrl: string;
+  branch?: string;
+  frontendDir?: string;
+  customSlug?: string;
+  envVars?: Record<string, string>;
   status:
     | "QUEUED"
     | "CLONING"
@@ -15,6 +18,14 @@ export interface Deployment {
   liveUrl?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface CreateDeploymentPayload {
+  repoUrl: string;
+  branch?: string;
+  frontendDir?: string;
+  customSlug?: string;
+  envVars?: Record<string, string>;
 }
 
 interface ApiResponse<T> {
@@ -43,10 +54,10 @@ export const cloudshipApi = {
   listDeployments: (): Promise<Deployment[]> =>
     request<Deployment[]>("/api/v1/deployments"),
 
-  createDeployment: (repoUrl: string): Promise<Deployment> =>
+  createDeployment: (payload: CreateDeploymentPayload): Promise<Deployment> =>
     request<Deployment>("/api/v1/deployments/deploy", {
       method: "POST",
-      body: JSON.stringify({ repoUrl }),
+      body: JSON.stringify(payload),
     }),
 
   getDeploymentStatus: (id: string): Promise<Deployment> =>

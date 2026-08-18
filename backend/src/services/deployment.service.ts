@@ -5,6 +5,7 @@ import { AppError } from "../utils/AppError";
 import { sqsService } from "../aws/sqs.service";
 import { IDeploymentRepository } from "../repositories/deployment.repository.interface";
 import { DynamoDBDeploymentRepository } from "../repositories/dynamodb.repository";
+import { DeploymentInput } from "../schemas/deployment.schema";
 
 // State machine: defines which transitions are valid for each status
 const VALID_TRANSITIONS: Record<DeploymentStatus, DeploymentStatus[]> = {
@@ -26,12 +27,16 @@ export class DeploymentService {
     return await this.repository.listAll();
   }
 
-  async createDeployment(repoUrl: string): Promise<Deployment> {
+  async createDeployment(input: DeploymentInput): Promise<Deployment> {
     const id = generateDeploymentID();
 
     const newDeployment: Deployment = {
       id,
-      repoUrl,
+      repoUrl: input.repoUrl,
+      branch: input.branch,
+      frontendDir: input.frontendDir,
+      customSlug: input.customSlug,
+      envVars: input.envVars,
       status: DeploymentStatus.QUEUED,
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -43,7 +48,11 @@ export class DeploymentService {
     // Asynchronously publish deployment job to SQS queue
     await sqsService.sendDeploymentJob({
       deploymentId: id,
-      repoUrl,
+      repoUrl: input.repoUrl,
+      branch: input.branch,
+      frontendDir: input.frontendDir,
+      customSlug: input.customSlug,
+      envVars: input.envVars,
     });
 
     return newDeployment;

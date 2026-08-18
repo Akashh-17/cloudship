@@ -70,6 +70,11 @@ async function processJob(message: Message) {
           deploymentId,
           status as DeploymentStatus
         );
+      },
+      {
+        branch: payload.branch,
+        frontendDir: payload.frontendDir,
+        envVars: payload.envVars,
       }
     );
 

@@ -16,19 +16,27 @@ export interface BuildResult {
   buildDurationMs: number;
 }
 
+export interface BuildOptions {
+  branch?: string;
+  frontendDir?: string;
+  envVars?: Record<string, string>;
+}
+
 export class BuildExecutorService {
   /**
    * Safe environment variables for child processes.
    * Preserves PATH for system utilities (git, npm) on Linux and Windows.
+   * Merges custom user build environment variables.
    */
-  private getSafeEnvironment(): NodeJS.ProcessEnv {
+  private getSafeEnvironment(extraEnv?: Record<string, string>): NodeJS.ProcessEnv {
     return {
       PATH: process.env.PATH || "/usr/local/bin:/usr/bin:/bin",
       Path: process.env.Path || process.env.PATH,
       NODE_ENV: "production",
       HOME: os.tmpdir(),
       USER: "cloudship-worker",
-      CI: "true", // Disables interactive prompts in many tools
+      CI: "true", // Disables interactive prompts
+      ...extraEnv,
     };
   }
 
@@ -39,7 +47,8 @@ export class BuildExecutorService {
   private async runCommand(
     file: string,
     args: string[],
-    cwd: string
+    cwd: string,
+    extraEnv?: Record<string, string>
   ): Promise<string> {
     const isWindows = process.platform === "win32";
     const executable = isWindows && file === "npm" ? "npm.cmd" : file;
@@ -48,7 +57,7 @@ export class BuildExecutorService {
       const { stdout, stderr } = await execFileAsync(executable, args, {
         cwd,
         timeout: BUILD_TIMEOUT_MS,
-        env: this.getSafeEnvironment(),
+        env: this.getSafeEnvironment(extraEnv),
         maxBuffer: 50 * 1024 * 1024, // 50MB buffer
         shell: isWindows,
       });
@@ -70,8 +79,7 @@ export class BuildExecutorService {
   }
 
   /**
-   * Detects the directory from which to run install + build.
-   * Handles monorepos where the frontend/ subdirectory has its own package.json.
+   * Reads package.json from a directory safely.
    */
   private async readPackageJson(dir: string): Promise<Record<string, any> | null> {
     try {
@@ -84,12 +92,28 @@ export class BuildExecutorService {
 
   /**
    * Smart build directory detection:
-   *  1. If root package.json has a "build" script → build from root (most common case).
-   *  2. Otherwise scan known subdirectory names for their own package.json with a build script.
-   *  3. Fallback: any subdirectory with a package.json (even without a build script).
-   *  4. Final fallback: root (static HTML site — no npm needed).
+   *  1. If explicitly provided by user and valid → use user choice.
+   *  2. If root package.json has a "build" script → build from root.
+   *  3. Otherwise scan known subdirectory names for package.json.
+   *  4. Fallback: static site.
    */
-  private async detectBuildDir(sandboxDir: string): Promise<{ buildDir: string; isStaticSite: boolean }> {
+  private async detectBuildDir(
+    sandboxDir: string,
+    overrideDir?: string
+  ): Promise<{ buildDir: string; isStaticSite: boolean }> {
+    // ── User Explicit Override ─────────────────────────────────────────────
+    if (overrideDir && overrideDir !== "./" && overrideDir !== ".") {
+      const cleanSub = overrideDir.replace(/^\.\//, "").trim();
+      const customPath = path.join(sandboxDir, cleanSub);
+      try {
+        await fs.access(customPath);
+        logger.info(`📁 [BuildExecutor] Using user-specified directory: ${cleanSub}/`);
+        return { buildDir: customPath, isStaticSite: false };
+      } catch {
+        logger.warn(`⚠️ User specified directory '${cleanSub}' not found, falling back to auto-detection.`);
+      }
+    }
+
     // ── 1. Check root package.json ──────────────────────────────────────────
     const rootPkg = await this.readPackageJson(sandboxDir);
     if (rootPkg?.scripts?.build) {
@@ -103,7 +127,6 @@ export class BuildExecutorService {
       "webapp", "react-app", "vue-app", "site",
       "packages/frontend", "packages/web", "apps/web", "apps/client",
     ];
-    // First pass: prefer subdirs that have a build script
     for (const sub of subDirs) {
       const subPath = path.join(sandboxDir, sub);
       const subPkg = await this.readPackageJson(subPath);
@@ -112,7 +135,6 @@ export class BuildExecutorService {
         return { buildDir: subPath, isStaticSite: false };
       }
     }
-    // Second pass: any subdir with a package.json (may have an implicit build via framework)
     for (const sub of subDirs) {
       const subPath = path.join(sandboxDir, sub);
       const subPkg = await this.readPackageJson(subPath);
@@ -122,34 +144,30 @@ export class BuildExecutorService {
       }
     }
 
-    // ── 3. Check if root has a package.json (even without a build script) ──
     if (rootPkg !== null) {
-      logger.info(`📁 [BuildExecutor] Root package.json found (no build script) — attempting root build`);
+      logger.info(`📁 [BuildExecutor] Root package.json found — attempting root build`);
       return { buildDir: sandboxDir, isStaticSite: false };
     }
 
-    // ── 4. Pure static site (no package.json anywhere) ────────────────────
     logger.info(`📁 [BuildExecutor] No package.json found — treating as static HTML site`);
     return { buildDir: sandboxDir, isStaticSite: true };
   }
 
   /**
    * Finds the output directory produced by the build.
-   * Checks all common framework output directories.
-   * Throws if no built output is found.
    */
   private async detectOutputDir(buildDir: string): Promise<string> {
     const candidates = [
-      "dist",          // Vite, Rollup, Parcel, Astro
-      "build",         // Create React App, Gatsby
-      "out",           // Next.js static export (next export)
-      ".output/public", // Nuxt 3
-      ".next",         // Next.js (SSR — serve as static if exported)
-      "public",        // Hugo, Jekyll (when output dir is public)
-      "_site",         // Jekyll, Eleventy
-      "www",           // Ionic, some older tools
-      "output",        // Some custom configs
-      "storybook-static", // Storybook
+      "dist",
+      "build",
+      "out",
+      ".output/public",
+      ".next",
+      "public",
+      "_site",
+      "www",
+      "output",
+      "storybook-static",
     ];
     for (const candidate of candidates) {
       const candidatePath = path.join(buildDir, candidate);
@@ -161,7 +179,7 @@ export class BuildExecutorService {
           return candidatePath;
         }
       } catch {
-        // Not found, try next
+        // Continue
       }
     }
     throw new AppError(
@@ -203,31 +221,31 @@ export class BuildExecutorService {
   }
 
   /**
-   * Executes a complete real build: git clone → npm install → npm build → collect dist files.
+   * Executes a complete real build with custom branch, directory, and user environment variables.
    */
   async executeBuild(
     deploymentId: string,
     repoUrl: string,
-    onStatusChange?: (status: string) => Promise<void>
+    onStatusChange?: (status: string) => Promise<void>,
+    options?: BuildOptions
   ): Promise<BuildResult> {
     const startTime = Date.now();
     const sandboxDir = path.join(os.tmpdir(), "cloudship-builds", deploymentId);
 
     try {
-      // Create sandbox directory
       await fs.mkdir(sandboxDir, { recursive: true });
       logger.info(`📁 [BuildExecutor] Created sandbox: ${sandboxDir}`);
 
       // ── 1. CLONING ──────────────────────────────────────────────────────────
       if (onStatusChange) await onStatusChange("CLONING");
-      logger.info(`📦 [BuildExecutor] Cloning ${repoUrl}...`);
-      await this.runCommand("git", ["clone", "--depth", "1", repoUrl, "."], sandboxDir);
+      const branchArgs = options?.branch && options.branch !== "main" ? ["-b", options.branch] : [];
+      logger.info(`📦 [BuildExecutor] Cloning ${repoUrl} (branch: ${options?.branch || "main"})...`);
+      await this.runCommand("git", ["clone", "--depth", "1", ...branchArgs, repoUrl, "."], sandboxDir);
 
-      // ── 2. DETECT BUILD DIRECTORY (smart monorepo + static site detection) ─
-      const { buildDir, isStaticSite } = await this.detectBuildDir(sandboxDir);
+      // ── 2. DETECT BUILD DIRECTORY (smart monorepo + override support) ──────
+      const { buildDir, isStaticSite } = await this.detectBuildDir(sandboxDir, options?.frontendDir);
 
       if (isStaticSite) {
-        // ── STATIC HTML SITE: no npm needed, serve root directly ────────────
         logger.info(`🌐 [BuildExecutor] Static HTML site detected — skipping npm install/build`);
         if (onStatusChange) await onStatusChange("UPLOADING");
         const files = await this.collectFiles(sandboxDir);
@@ -240,15 +258,13 @@ export class BuildExecutorService {
 
       // ── 3. INSTALLING ────────────────────────────────────────────────────
       if (onStatusChange) await onStatusChange("INSTALLING");
-      logger.info(`📥 [BuildExecutor] Installing npm dependencies in: ${path.relative(sandboxDir, buildDir) || "."}`);
-      await this.runCommand("npm", ["install", "--ignore-scripts"], buildDir);
+      logger.info(`📥 [BuildExecutor] Installing npm dependencies...`);
+      await this.runCommand("npm", ["install", "--ignore-scripts"], buildDir, options?.envVars);
 
       // ── 4. BUILDING ──────────────────────────────────────────────────────
       if (onStatusChange) await onStatusChange("BUILDING");
       logger.info(`⚙️ [BuildExecutor] Running npm run build...`);
-      await this.runCommand("npm", ["run", "build"], buildDir);
-      // ⚠️  No silent swallow here — if build fails, the error propagates and
-      //     the deployment is marked FAILED instead of uploading source files.
+      await this.runCommand("npm", ["run", "build"], buildDir, options?.envVars);
 
       // ── 5. LOCATE OUTPUT BUNDLE ──────────────────────────────────────────
       const outputDir = await this.detectOutputDir(buildDir);
@@ -268,7 +284,6 @@ export class BuildExecutorService {
         buildDurationMs: Date.now() - startTime,
       };
     } finally {
-      // ── SANDBOX CLEANUP ────────────────────────────────────────────────────
       try {
         await fs.rm(sandboxDir, { recursive: true, force: true });
         logger.info(`🧹 [BuildExecutor] Cleaned up sandbox: ${sandboxDir}`);
