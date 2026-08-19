@@ -26,7 +26,7 @@ export function getContentType(filename: string): string {
 
 export interface DeploymentFile {
   relativePath: string;
-  content: string | Buffer;
+  content: string | Uint8Array;
   contentType?: string;
 }
 
@@ -36,7 +36,7 @@ export class S3Service {
   async uploadArtifact(
     deploymentId: string,
     filename: string,
-    content: string | Buffer,
+    content: string | Uint8Array,
     contentType?: string
   ): Promise<string | undefined> {
     if (!this.bucketName) {
@@ -70,28 +70,35 @@ export class S3Service {
 
   getPublicUrl(deploymentId: string, filename: string = ""): string {
     if (env.CLOUDFRONT_DOMAIN) {
-      const key = `deployments/${deploymentId}/${filename.replace(/^\/+/, "")}`;
-      return `https://${env.CLOUDFRONT_DOMAIN}/${key}`;
+      const cleanDomain = env.CLOUDFRONT_DOMAIN.replace(/^https?:\/\//, "").replace(/\/+$/, "");
+      const pathSuffix = filename ? `/${filename.replace(/^\/+/, "")}` : "";
+      return `https://${cleanDomain}/sites/${deploymentId}${pathSuffix}`;
     }
     const baseUrl = process.env.PUBLIC_API_URL || "http://localhost:3000";
-    return `${baseUrl.replace(/\/+$/, "")}/sites/${deploymentId}`;
+    const pathSuffix = filename ? `/${filename.replace(/^\/+/, "")}` : "";
+    return `${baseUrl.replace(/\/+$/, "")}/sites/${deploymentId}${pathSuffix}`;
   }
 
+  /**
+   * Uploads all deployment files concurrently in parallel to minimize upload latency.
+   */
   async uploadDeploymentBundle(
     deploymentId: string,
     files: DeploymentFile[]
   ): Promise<string[]> {
-    const uploadedUrls: string[] = [];
-
-    for (const file of files) {
-      const url = await this.uploadArtifact(
+    logger.info(`⚡ [S3] Starting parallel upload of ${files.length} artifacts for ${deploymentId}...`);
+    const uploadPromises = files.map((file) =>
+      this.uploadArtifact(
         deploymentId,
         file.relativePath,
         file.content,
         file.contentType
-      );
-      if (url) uploadedUrls.push(url);
-    }
+      )
+    );
+
+    const results = await Promise.all(uploadPromises);
+    const uploadedUrls = results.filter((url): url is string => Boolean(url));
+    logger.info(`✅ [S3] Finished parallel upload of ${uploadedUrls.length}/${files.length} artifacts!`);
 
     return uploadedUrls;
   }

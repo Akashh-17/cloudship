@@ -7,60 +7,77 @@ import { logger } from "../logger/logger";
 
 const router = Router();
 
-async function handleSiteProxy(req: Request, res: Response) {
-  const deploymentId = req.params.id;
-  const rawSubpath = (req.params as any).filepath || (req.params as any)[0] || "";
-  let subpath = String(rawSubpath).replace(/^\/+/, "");
+// File extensions that should NEVER fall back to index.html.
+// If a JS/CSS/SVG asset is missing, return 404 — NOT index.html —
+// because browsers enforce strict MIME types on module scripts.
+const ASSET_EXTENSIONS = /\.(js|mjs|cjs|css|svg|png|jpg|jpeg|gif|ico|webp|woff2?|ttf|eot|otf|json|map|gz|br|txt|xml)$/i;
 
-  if (!subpath || subpath === "") {
-    subpath = "index.html";
-  }
-
-  const bucketName = env.S3_BUCKET_NAME;
-  const key = `deployments/${deploymentId}/${subpath}`;
-
+async function fetchFromS3(
+  bucket: string,
+  key: string
+): Promise<{ body: Buffer; contentType: string } | null> {
   try {
-    const command = new GetObjectCommand({
-      Bucket: bucketName,
-      Key: key,
-    });
-
+    const command = new GetObjectCommand({ Bucket: bucket, Key: key });
     const response = await s3Client.send(command);
-
-    const contentType = response.ContentType || getContentType(subpath);
-    res.setHeader("Content-Type", contentType);
-
-    if (response.Body) {
-      const byteArray = await response.Body.transformToByteArray();
-      return res.status(200).send(Buffer.from(byteArray));
-    }
-
-    return res.status(404).send("Artifact empty");
-  } catch (error: any) {
-    // Single Page Application (SPA) fallback: If subpath fails, return index.html
-    if (subpath !== "index.html") {
-      try {
-        const fallbackCommand = new GetObjectCommand({
-          Bucket: bucketName,
-          Key: `deployments/${deploymentId}/index.html`,
-        });
-        const fallbackRes = await s3Client.send(fallbackCommand);
-        res.setHeader("Content-Type", "text/html; charset=utf-8");
-        if (fallbackRes.Body) {
-          const byteArray = await fallbackRes.Body.transformToByteArray();
-          return res.status(200).send(Buffer.from(byteArray));
-        }
-      } catch {
-        // Continue to 404
-      }
-    }
-
-    logger.warn(`⚠️ [SiteProxy] Artifact not found for key: ${key}`);
-    return res.status(404).send("Deployment or file not found");
+    if (!response.Body) return null;
+    const byteArray = await response.Body.transformToByteArray();
+    const contentType = response.ContentType || getContentType(key);
+    return { body: Buffer.from(byteArray), contentType };
+  } catch (err: any) {
+    logger.debug(`[SiteProxy] S3 miss for key="${key}" reason="${err?.Code || err?.message || err}"`);
+    return null;
   }
 }
 
-// Express 5 compatible route parameters
+async function handleSiteProxy(req: Request, res: Response) {
+  // ── Parse URL manually from req.path for Express 5 compatibility ─────────
+  // Do NOT rely on req.params.filepath — Express 5 / path-to-regexp v8
+  // wildcard params behave differently from Express 4.
+  //
+  // router is mounted at /sites, so req.path = "/:id" or "/:id/some/asset.js"
+  // req.path examples:
+  //   /dep_abc123              → serve index.html
+  //   /dep_abc123/assets/a.js → serve assets/a.js
+  const pathSegments = req.path.replace(/^\//, "").split("/");
+  const deploymentId = pathSegments[0];
+  const subpath = pathSegments.slice(1).join("/") || "index.html";
+
+  const bucketName = env.S3_BUCKET_NAME!;
+  const key = `deployments/${deploymentId}/${subpath}`;
+
+  logger.info(`[SiteProxy] → s3://${bucketName}/${key}`);
+
+  // ── 1. Try exact S3 key ──────────────────────────────────────────────────
+  const result = await fetchFromS3(bucketName, key);
+  if (result) {
+    res.setHeader("Content-Type", result.contentType);
+    res.setHeader(
+      "Cache-Control",
+      subpath === "index.html" ? "no-cache, no-store, must-revalidate" : "max-age=31536000, immutable"
+    );
+    return res.status(200).send(result.body);
+  }
+
+  // ── 2. SPA fallback: ONLY for route-like paths, NEVER for static assets ──
+  // If .js/.css/.svg etc. is not found → 404 (prevents MIME type errors).
+  // If a React Router path like /dashboard is not found → serve index.html.
+  const isAsset = ASSET_EXTENSIONS.test(subpath);
+  if (!isAsset && subpath !== "index.html") {
+    logger.debug(`[SiteProxy] SPA fallback for route: ${subpath}`);
+    const fallback = await fetchFromS3(bucketName, `deployments/${deploymentId}/index.html`);
+    if (fallback) {
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+      return res.status(200).send(fallback.body);
+    }
+  }
+
+  logger.warn(`[SiteProxy] 404 Not Found: ${key}`);
+  return res.status(404).send(`File not found: ${subpath}`);
+}
+
+// Express 5 compatible — we use ONE wildcard route that catches all sub-paths.
+// req.path is used internally so the exact wildcard format doesn't matter.
 router.get("/:id", handleSiteProxy);
 router.get("/:id/*filepath", handleSiteProxy);
 
