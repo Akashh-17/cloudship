@@ -1,10 +1,9 @@
 import { Router, Request, Response } from "express";
+import { ListTablesCommand } from "@aws-sdk/client-dynamodb";
 import { sqsService } from "../aws/sqs.service";
-import { DynamoDBDeploymentRepository } from "../repositories/dynamodb.repository";
-import { s3Service } from "../aws/s3.service";
+import { dynamoClient } from "../aws/config";
 
 const router = Router();
-const dynamoRepo = new DynamoDBDeploymentRepository();
 
 // Basic health check
 router.get("/", (req: Request, res: Response) => {
@@ -22,7 +21,7 @@ router.get("/detailed", async (req: Request, res: Response) => {
   
   let dbStatus = "HEALTHY";
   try {
-    await dynamoRepo.listAll();
+    await dynamoClient.send(new ListTablesCommand({}));
   } catch {
     dbStatus = "UNHEALTHY";
   }

@@ -1,0 +1,17 @@
+# Dependencies and generated output
+node_modules/
+dist/
+coverage/
+.vite/
+cdk.out/
+
+# Environment and local tooling
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+
+# Editor / OS files
+.idea/
+.vscode/

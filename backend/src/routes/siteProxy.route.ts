@@ -1,5 +1,6 @@
 import { Router, Request, Response } from "express";
 import { GetObjectCommand } from "@aws-sdk/client-s3";
+import { LRUCache } from "lru-cache";
 import { s3Client } from "../aws/config";
 import { env } from "../config/env";
 import { getContentType } from "../aws/s3.service";
@@ -12,17 +13,33 @@ const router = Router();
 // because browsers enforce strict MIME types on module scripts.
 const ASSET_EXTENSIONS = /\.(js|mjs|cjs|css|svg|png|jpg|jpeg|gif|ico|webp|woff2?|ttf|eot|otf|json|map|gz|br|txt|xml)$/i;
 
+// In-process cache for immutable, fingerprinted build assets (never index.html —
+// that must always hit S3 so redeploys show up instantly).
+const assetCache = new LRUCache<string, { body: Buffer; contentType: string }>({
+  maxSize: 150 * 1024 * 1024, // 150MB cap
+  sizeCalculation: (v) => v.body.byteLength || 1,
+  ttl: 1000 * 60 * 60 * 24, // 24h TTL
+});
+
 async function fetchFromS3(
   bucket: string,
-  key: string
+  key: string,
+  cacheable: boolean
 ): Promise<{ body: Buffer; contentType: string } | null> {
+  if (cacheable) {
+    const cached = assetCache.get(key);
+    if (cached) return cached;
+  }
+
   try {
     const command = new GetObjectCommand({ Bucket: bucket, Key: key });
     const response = await s3Client.send(command);
     if (!response.Body) return null;
     const byteArray = await response.Body.transformToByteArray();
     const contentType = response.ContentType || getContentType(key);
-    return { body: Buffer.from(byteArray), contentType };
+    const result = { body: Buffer.from(byteArray), contentType };
+    if (cacheable) assetCache.set(key, result);
+    return result;
   } catch (err: any) {
     logger.debug(`[SiteProxy] S3 miss for key="${key}" reason="${err?.Code || err?.message || err}"`);
     return null;
@@ -42,13 +59,18 @@ async function handleSiteProxy(req: Request, res: Response) {
   const deploymentId = pathSegments[0];
   const subpath = pathSegments.slice(1).join("/") || "index.html";
 
-  const bucketName = env.S3_BUCKET_NAME!;
+  const bucketName = env.S3_BUCKET_NAME;
+  if (!bucketName) return res.status(503).send("Site hosting is not configured");
   const key = `deployments/${deploymentId}/${subpath}`;
 
   logger.info(`[SiteProxy] → s3://${bucketName}/${key}`);
 
+  // Fingerprinted build assets never change content for a given deployment —
+  // index.html must always be fetched fresh so redeploys propagate instantly.
+  const isImmutable = subpath !== "index.html";
+
   // ── 1. Try exact S3 key ──────────────────────────────────────────────────
-  const result = await fetchFromS3(bucketName, key);
+  const result = await fetchFromS3(bucketName, key, isImmutable);
   if (result) {
     res.setHeader("Content-Type", result.contentType);
     res.setHeader(
@@ -64,7 +86,7 @@ async function handleSiteProxy(req: Request, res: Response) {
   const isAsset = ASSET_EXTENSIONS.test(subpath);
   if (!isAsset && subpath !== "index.html") {
     logger.debug(`[SiteProxy] SPA fallback for route: ${subpath}`);
-    const fallback = await fetchFromS3(bucketName, `deployments/${deploymentId}/index.html`);
+    const fallback = await fetchFromS3(bucketName, `deployments/${deploymentId}/index.html`, false);
     if (fallback) {
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");

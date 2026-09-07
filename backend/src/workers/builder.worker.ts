@@ -1,9 +1,12 @@
+import pLimit from "p-limit";
 import { sqsService, DeploymentJobPayload } from "../aws/sqs.service";
 import { s3Service } from "../aws/s3.service";
 import { cloudWatchService } from "../aws/cloudwatch.service";
 import { buildExecutorService } from "../services/buildExecutor.service";
+import { BuildLogService } from "../services/log.service";
 import { DeploymentService } from "../services/deployment.service";
 import { DeploymentStatus } from "../constants/deploymentStatus";
+import { env } from "../config/env";
 import { logger } from "../logger/logger";
 import { Message } from "@aws-sdk/client-sqs";
 
@@ -39,7 +42,8 @@ async function processJob(message: Message) {
     existingDeployment = await deploymentService.getDeploymentStatus(deploymentId);
     if (
       existingDeployment.status === DeploymentStatus.SUCCESS ||
-      existingDeployment.status === DeploymentStatus.FAILED
+      existingDeployment.status === DeploymentStatus.FAILED ||
+      existingDeployment.status === DeploymentStatus.CANCELLED
     ) {
       logger.info(
         `⏭️ [Worker] [${deploymentId}] Already in terminal state: ${existingDeployment.status}. Deleting duplicate SQS message.`
@@ -48,7 +52,9 @@ async function processJob(message: Message) {
       return;
     }
   } catch {
-    logger.info(`ℹ️ [Worker] [${deploymentId}] Record not found yet, starting fresh build processing.`);
+    logger.warn(`⚠️ [Worker] [${deploymentId}] Record missing or unreadable. Deleting stale message.`);
+    await sqsService.deleteDeploymentJob(receiptHandle);
+    return;
   }
 
   // Start Visibility Heartbeat timer (every 25 seconds extend SQS visibility by 60 seconds)
@@ -58,6 +64,8 @@ async function processJob(message: Message) {
   }, 25000);
 
   const startTime = Date.now();
+  const logService = new BuildLogService(deploymentId);
+  logService.start();
 
   try {
     // Execute real build (git clone -> npm install -> npm build -> collect dist files)
@@ -75,6 +83,7 @@ async function processJob(message: Message) {
         branch: payload.branch,
         frontendDir: payload.frontendDir,
         envVars: payload.envVars,
+        onLog: (line) => logService.append(line),
       }
     );
 
@@ -86,7 +95,7 @@ async function processJob(message: Message) {
     await s3Service.verifyDeploymentArtifacts(deploymentId);
 
     // 5. SUCCESS
-    const liveUrl = s3Service.getPublicUrl(deploymentId, "index.html");
+    const liveUrl = s3Service.getPublicUrl(deploymentId);
     logger.info(`✅ [Worker] [${deploymentId}] Status ➔ SUCCESS | Live URL: ${liveUrl}`);
     await deploymentService.updateDeploymentStatus(
       deploymentId,
@@ -100,9 +109,10 @@ async function processJob(message: Message) {
     // Stop heartbeat timer and delete message from SQS ONLY on success
     clearInterval(heartbeatInterval);
     await sqsService.deleteDeploymentJob(receiptHandle);
-  } catch (error) {
+  } catch (error: any) {
     clearInterval(heartbeatInterval);
     logger.error(error, `❌ [Worker] [${deploymentId}] Build failed on attempt ${receiveCount}!`);
+    logService.append(`FAILED: ${error?.message || error}`);
     await cloudWatchService.recordDeploymentFailure();
 
     try {
@@ -115,19 +125,22 @@ async function processJob(message: Message) {
         `⚠️ Failed to set status to FAILED for ${deploymentId}. Message left in queue for retry/DLQ.`
       );
     }
+  } finally {
+    await logService.stop();
   }
 }
 
 async function startWorker() {
-  logger.info("⚡ CloudShip Deployment Build Worker Started! Polling AWS SQS with Reliability Layer...");
+  const concurrency = env.WORKER_CONCURRENCY;
+  const limit = pLimit(concurrency);
+  logger.info(`⚡ CloudShip Deployment Build Worker Started! Concurrency: ${concurrency}. Polling AWS SQS with Reliability Layer...`);
 
   while (true) {
     try {
-      const messages = await sqsService.receiveDeploymentJobs(1, 20);
+      // SQS caps a single ReceiveMessage call at 10 messages regardless of requested concurrency.
+      const messages = await sqsService.receiveDeploymentJobs(Math.min(concurrency, 10), 20);
       if (messages.length > 0) {
-        for (const message of messages) {
-          await processJob(message);
-        }
+        await Promise.all(messages.map((message) => limit(() => processJob(message))));
       }
     } catch (error) {
       logger.error(error, "❌ Error polling SQS queue in worker loop");

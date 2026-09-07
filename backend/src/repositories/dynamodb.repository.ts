@@ -1,4 +1,4 @@
-import { PutCommand, GetCommand, UpdateCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
+import { PutCommand, GetCommand, UpdateCommand, QueryCommand, DeleteCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { docClient } from "../aws/config";
 import { env } from "../config/env";
 import { Deployment } from "../types/deployment";
@@ -7,15 +7,35 @@ import { IDeploymentRepository } from "./deployment.repository.interface";
 import { AppError } from "../utils/AppError";
 import { logger } from "../logger/logger";
 
-// Fallback in-memory store for local testing when IAM permissions are restricted
-const inMemoryStore = new Map<string, Deployment>();
+export const USER_CREATED_AT_INDEX = "userId-createdAt-index";
+
+function toDeployment(item: Record<string, any>): Deployment {
+  return {
+    id: item.id,
+    repoUrl: item.repoUrl,
+    status: item.status as DeploymentStatus,
+    liveUrl: item.liveUrl,
+    branch: item.branch,
+    frontendDir: item.frontendDir,
+    customSlug: item.customSlug,
+    publicKey: item.publicKey || item.id,
+    envVars: item.envVars,
+    userId: item.userId,
+    statusVersion: item.statusVersion || 0,
+    attempt: item.attempt || 1,
+    buildId: item.buildId,
+    failureCategory: item.failureCategory,
+    failureMessage: item.failureMessage,
+    cancelledAt: item.cancelledAt ? new Date(item.cancelledAt) : undefined,
+    createdAt: new Date(item.createdAt),
+    updatedAt: new Date(item.updatedAt),
+  };
+}
 
 export class DynamoDBDeploymentRepository implements IDeploymentRepository {
   private tableName = env.DYNAMODB_TABLE_NAME;
 
   async save(deployment: Deployment): Promise<Deployment> {
-    inMemoryStore.set(deployment.id, deployment);
-
     const item = {
       ...deployment,
       createdAt: deployment.createdAt.toISOString(),
@@ -23,141 +43,135 @@ export class DynamoDBDeploymentRepository implements IDeploymentRepository {
     };
 
     try {
-      await docClient.send(
-        new PutCommand({
+      const transactItems: any[] = [{
+        Put: {
           TableName: this.tableName,
           Item: item,
-        })
-      );
+          ConditionExpression: "attribute_not_exists(id)",
+        },
+      }];
+      if (deployment.customSlug) {
+        transactItems.push({
+          Put: {
+            TableName: this.tableName,
+            Item: { id: `slug#${deployment.customSlug}`, deploymentId: deployment.id, type: "SLUG_RESERVATION" },
+            ConditionExpression: "attribute_not_exists(id)",
+          },
+        });
+      }
+      await docClient.send(new TransactWriteCommand({ TransactItems: transactItems }));
       logger.info(`💾 [DynamoDB] Saved deployment: ${deployment.id}`);
+      return deployment;
     } catch (error: any) {
-      logger.warn(
-        `⚠️ [DynamoDB] Could not save to Cloud DynamoDB (${error.name || error.message}). Falling back to local memory store.`
-      );
+      logger.error(error, `❌ [DynamoDB] Failed to save deployment ${deployment.id}`);
+      throw new AppError(503, "Failed to persist deployment — database unavailable");
     }
-    return deployment;
   }
 
   async findById(id: string): Promise<Deployment | null> {
     try {
-      const response = await docClient.send(
-        new GetCommand({
-          TableName: this.tableName,
-          Key: { id },
-        })
-      );
-
-      if (!response.Item) {
-        return inMemoryStore.get(id) || null;
-      }
-
-      const item = response.Item;
-      const deployment: Deployment = {
-        id: item.id,
-        repoUrl: item.repoUrl,
-        status: item.status as DeploymentStatus,
-        liveUrl: item.liveUrl,
-        createdAt: new Date(item.createdAt),
-        updatedAt: new Date(item.updatedAt),
-      };
-      inMemoryStore.set(id, deployment);
-      return deployment;
+      const response = await docClient.send(new GetCommand({ TableName: this.tableName, Key: { id } }));
+      if (!response.Item) return null;
+      return toDeployment(response.Item);
     } catch (error: any) {
-      logger.warn(
-        `⚠️ [DynamoDB] Fetch failed (${error.name || error.message}). Returning local memory record.`
-      );
-      return inMemoryStore.get(id) || null;
+      logger.error(error, `❌ [DynamoDB] Failed to fetch deployment ${id}`);
+      throw new AppError(503, "Failed to read deployment — database unavailable");
     }
   }
 
-  async updateStatus(id: string, status: DeploymentStatus, liveUrl?: string): Promise<Deployment> {
-    const existing = inMemoryStore.get(id);
-    const updated: Deployment = {
-      id,
-      repoUrl: existing ? existing.repoUrl : "",
-      status,
-      liveUrl: liveUrl || (existing ? existing.liveUrl : undefined),
-      createdAt: existing ? existing.createdAt : new Date(),
-      updatedAt: new Date(),
-    };
-    inMemoryStore.set(id, updated);
+  async updateStatus(id: string, status: DeploymentStatus, options: {
+    liveUrl?: string;
+    expectedVersion?: number;
+    failureCategory?: Deployment["failureCategory"];
+    failureMessage?: string;
+    buildId?: string;
+  } = {}): Promise<Deployment> {
+    const updatedAt = new Date().toISOString();
 
-    const updatedAt = updated.updatedAt.toISOString();
-
-    const updateExpression = liveUrl
-      ? "SET #status = :status, #updatedAt = :updatedAt, #liveUrl = :liveUrl"
-      : "SET #status = :status, #updatedAt = :updatedAt";
+    const sets = ["#status = :status", "#updatedAt = :updatedAt", "#statusVersion = #statusVersion + :one"];
+    if (options.liveUrl) sets.push("#liveUrl = :liveUrl");
+    if (options.failureCategory) sets.push("#failureCategory = :failureCategory");
+    if (options.failureMessage) sets.push("#failureMessage = :failureMessage");
+    if (options.buildId) sets.push("#buildId = :buildId");
 
     const expressionAttributeNames: Record<string, string> = {
       "#status": "status",
       "#updatedAt": "updatedAt",
+      "#statusVersion": "statusVersion",
     };
-    if (liveUrl) expressionAttributeNames["#liveUrl"] = "liveUrl";
+    if (options.liveUrl) expressionAttributeNames["#liveUrl"] = "liveUrl";
+    if (options.failureCategory) expressionAttributeNames["#failureCategory"] = "failureCategory";
+    if (options.failureMessage) expressionAttributeNames["#failureMessage"] = "failureMessage";
+    if (options.buildId) expressionAttributeNames["#buildId"] = "buildId";
 
     const expressionAttributeValues: Record<string, any> = {
       ":status": status,
       ":updatedAt": updatedAt,
+      ":one": 1,
     };
-    if (liveUrl) expressionAttributeValues[":liveUrl"] = liveUrl;
+    if (options.liveUrl) expressionAttributeValues[":liveUrl"] = options.liveUrl;
+    if (options.failureCategory) expressionAttributeValues[":failureCategory"] = options.failureCategory;
+    if (options.failureMessage) expressionAttributeValues[":failureMessage"] = options.failureMessage.slice(0, 500);
+    if (options.buildId) expressionAttributeValues[":buildId"] = options.buildId;
 
     try {
       const response = await docClient.send(
         new UpdateCommand({
           TableName: this.tableName,
           Key: { id },
-          UpdateExpression: updateExpression,
+          UpdateExpression: `SET ${sets.join(", ")}`,
           ExpressionAttributeNames: expressionAttributeNames,
           ExpressionAttributeValues: expressionAttributeValues,
+          ...(options.expectedVersion === undefined ? {} : {
+            ConditionExpression: "#statusVersion = :expectedVersion",
+            ExpressionAttributeValues: { ...expressionAttributeValues, ":expectedVersion": options.expectedVersion },
+          }),
           ReturnValues: "ALL_NEW",
         })
       );
 
-      if (response.Attributes) {
-        const item = response.Attributes;
-        logger.info(`💾 [DynamoDB] Updated deployment ${id} status ➔ ${status}${liveUrl ? ` (URL: ${liveUrl})` : ""}`);
+      if (!response.Attributes) {
+        throw new AppError(404, `Deployment ${id} not found`);
       }
-    } catch (error: any) {
-      logger.warn(
-        `⚠️ [DynamoDB] Status update to Cloud DynamoDB failed (${error.name || error.message}). Status updated in local memory store.`
-      );
-    }
 
-    return updated;
+      const updated = toDeployment(response.Attributes);
+      logger.info(`💾 [DynamoDB] Updated deployment ${id} status ➔ ${status}${options.liveUrl ? ` (URL: ${options.liveUrl})` : ""}`);
+      return updated;
+    } catch (error: any) {
+      if (error instanceof AppError) throw error;
+      logger.error(error, `❌ [DynamoDB] Failed to update status for ${id}`);
+      throw new AppError(503, "Failed to update deployment — database unavailable");
+    }
   }
 
-  async listAll(): Promise<Deployment[]> {
+  async listByUser(userId: string, limit = 50): Promise<Deployment[]> {
     try {
       const response = await docClient.send(
-        new ScanCommand({
+        new QueryCommand({
           TableName: this.tableName,
+          IndexName: USER_CREATED_AT_INDEX,
+          KeyConditionExpression: "userId = :uid",
+          ExpressionAttributeValues: { ":uid": userId },
+          ScanIndexForward: false, // newest first
+          Limit: limit,
         })
       );
 
       const items = response.Items || [];
-      const cloudDeployments: Deployment[] = items.map((item) => ({
-        id: item.id,
-        repoUrl: item.repoUrl,
-        status: item.status as DeploymentStatus,
-        liveUrl: item.liveUrl,
-        createdAt: new Date(item.createdAt),
-        updatedAt: new Date(item.updatedAt),
-      }));
-
-      // Merge cloud items into in-memory store
-      for (const item of cloudDeployments) {
-        inMemoryStore.set(item.id, item);
-      }
-
-      return Array.from(inMemoryStore.values()).sort(
-        (a, b) => b.createdAt.getTime() - a.createdAt.getTime()
-      );
+      return items.map(toDeployment);
     } catch (error: any) {
-      logger.warn(
-        `⚠️ [DynamoDB] Scan failed (${error.name || error.message}). Returning local memory deployments list.`
-      );
-      return Array.from(inMemoryStore.values()).sort(
-        (a, b) => b.createdAt.getTime() - a.createdAt.getTime()
-      );
+      logger.error(error, `❌ [DynamoDB] Failed to query deployments for user ${userId}`);
+      throw new AppError(503, "Failed to list deployments — database unavailable");
+    }
+  }
+
+  async delete(id: string): Promise<void> {
+    try {
+      await docClient.send(new DeleteCommand({ TableName: this.tableName, Key: { id } }));
+      logger.info(`🗑️ [DynamoDB] Deleted deployment: ${id}`);
+    } catch (error: any) {
+      logger.error(error, `❌ [DynamoDB] Failed to delete deployment ${id}`);
+      throw new AppError(503, "Failed to delete deployment — database unavailable");
     }
   }
 }

@@ -2,12 +2,9 @@ import os from "os";
 import path from "path";
 import fs from "fs/promises";
 import { execFile } from "child_process";
-import { promisify } from "util";
 import { logger } from "../logger/logger";
 import { AppError } from "../utils/AppError";
 import { DeploymentFile, getContentType } from "../aws/s3.service";
-
-const execFileAsync = promisify(execFile);
 
 const BUILD_TIMEOUT_MS = 8 * 60 * 1000; // 8-minute timeout per command
 
@@ -16,10 +13,13 @@ export interface BuildResult {
   buildDurationMs: number;
 }
 
+export type LogCallback = (line: string) => void;
+
 export interface BuildOptions {
   branch?: string;
   frontendDir?: string;
   envVars?: Record<string, string>;
+  onLog?: LogCallback;
 }
 
 export class BuildExecutorService {
@@ -46,7 +46,18 @@ export class BuildExecutorService {
       Path: fullPath,
       HOME: os.tmpdir(),
       USER: "cloudship-worker",
-      CI: "true", // Disables interactive prompts in npm
+      // ── Generalized build resilience (matches Vercel & Netlify platform standards) ──
+      CI: "false", // Prevents CRA, Vite, Webpack from treating non-fatal warnings as errors
+      DISABLE_ESLINT_PLUGIN: "true", // Disables webpack eslint plugin from failing builds
+      ESLINT_NO_DEV_ERRORS: "true", // Converts all ESLint errors to warnings
+      TSC_COMPILE_ON_ERROR: "true", // Allows TypeScript builds to emit JS even if type warnings exist
+      NEXT_TELEMETRY_DISABLED: "1", // Disables Next.js telemetry network calls
+      HUSKY: "0", // Disables git pre-commit/pre-push hooks in user repositories
+      NPM_CONFIG_LEGACY_PEER_DEPS: "true", // Automatically resolves peer dependency conflicts in npm 7+
+      NPM_CONFIG_AUDIT: "false", // Speeds up install and silences security audit warnings
+      NPM_CONFIG_FUND: "false", // Silences funding messages
+      PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "1", // Prevents downloading Chromium binaries
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1", // Prevents downloading Playwright browser binaries
       ...extraEnv,
     };
 
@@ -72,35 +83,58 @@ export class BuildExecutorService {
     args: string[],
     cwd: string,
     extraEnv?: Record<string, string>,
-    nodeEnv?: string
+    nodeEnv?: string,
+    onLog?: LogCallback
   ): Promise<string> {
     const isWindows = process.platform === "win32";
     // On Windows, always use shell:true so .cmd scripts (npm.cmd, vite.cmd) resolve correctly
     const executable = isWindows ? (file === "npm" ? "npm" : file) : file;
 
-    try {
-      const { stdout, stderr } = await execFileAsync(executable, args, {
-        cwd,
-        timeout: BUILD_TIMEOUT_MS,
-        env: this.getSafeEnvironment(cwd, extraEnv, nodeEnv),
-        maxBuffer: 50 * 1024 * 1024,
-        shell: isWindows, // shell:true on Windows resolves .cmd extensions automatically
+    return new Promise<string>((resolve, reject) => {
+      let stdoutBuf = "";
+      let stderrBuf = "";
+
+      const child = execFile(
+        executable,
+        args,
+        {
+          cwd,
+          timeout: BUILD_TIMEOUT_MS,
+          env: this.getSafeEnvironment(cwd, extraEnv, nodeEnv),
+          maxBuffer: 50 * 1024 * 1024,
+          shell: isWindows, // shell:true on Windows resolves .cmd extensions automatically
+        },
+        (error: any) => {
+          if (error) {
+            if (error.killed) {
+              reject(new AppError(408, `Command '${file}' timed out after 8 minutes`));
+            } else {
+              const combinedOutput = [stdoutBuf.trim(), stderrBuf.trim()].filter(Boolean).join("\n");
+              reject(
+                new AppError(500, `Build process error (${file}): ${combinedOutput.slice(-2000) || error.message}`)
+              );
+            }
+            return;
+          }
+          if (stderrBuf) {
+            logger.debug(`[BuildExecutor] ${file} stderr: ${stderrBuf.substring(0, 500)}`);
+          }
+          resolve(stdoutBuf);
+        }
+      );
+
+      child.stdout?.on("data", (chunk: Buffer) => {
+        const text = chunk.toString("utf-8");
+        stdoutBuf += text;
+        onLog?.(text);
       });
 
-      if (stderr) {
-        logger.debug(`[BuildExecutor] ${file} stderr: ${stderr.substring(0, 500)}`);
-      }
-
-      return stdout;
-    } catch (error: any) {
-      if (error.killed) {
-        throw new AppError(408, `Command '${file}' timed out after 8 minutes`);
-      }
-      throw new AppError(
-        500,
-        `Build process error (${file}): ${error.stderr || error.message}`
-      );
-    }
+      child.stderr?.on("data", (chunk: Buffer) => {
+        const text = chunk.toString("utf-8");
+        stderrBuf += text;
+        onLog?.(text);
+      });
+    });
   }
 
   /**
@@ -272,10 +306,10 @@ export class BuildExecutorService {
       case "parcel":
       case "unknown":
       default:
-        // CRA, Gatsby, Parcel, Webpack, and most other tools respect PUBLIC_URL
+        // CRA, Gatsby, Parcel, Webpack, and most other tools respect PUBLIC_URL and CI=false
         return {
           args: ["run", "build"],
-          envOverrides: { PUBLIC_URL: "." },
+          envOverrides: { PUBLIC_URL: ".", CI: "false" },
         };
 
       case "next":
@@ -309,7 +343,7 @@ export class BuildExecutorService {
       }
       // Convert absolute asset refs → relative
       // Matches: src="/assets/", href="/assets/", src='/favicon', etc.
-      text = text.replace(/(["'])(\/(?:assets|static|_next|_nuxt)\/)/g, "$1./$2".replace("/", ""));
+      text = text.replace(/(["'])(\/(?:assets|static|_next|_nuxt)\/)/g, "$1.$2");
       text = text.replace(/(["'])\/(?=(?:favicon|icons?|logo|manifest|robots)[^"']*["'])/g, "$1./");
     }
 
@@ -373,17 +407,29 @@ export class BuildExecutorService {
     options?: BuildOptions
   ): Promise<BuildResult> {
     const startTime = Date.now();
-    const sandboxDir = path.join(os.tmpdir(), "cloudship-builds", deploymentId);
+    // On Windows, os.tmpdir() paths combined with deep node_modules trees can
+    // exceed the 260-char MAX_PATH limit, causing cryptic ENOENT errors mid-install.
+    // Use a short, fixed base path instead.
+    const base = process.platform === "win32"
+      ? "C:\\cs-builds"
+      : path.join(os.tmpdir(), "cloudship-builds");
+    const sandboxDir = path.join(base, deploymentId);
 
     try {
       await fs.mkdir(sandboxDir, { recursive: true });
       logger.info(`📁 [BuildExecutor] Created sandbox: ${sandboxDir}`);
 
+      // Enable long path support in git before cloning (Windows only).
+      if (process.platform === "win32") {
+        await this.runCommand("git", ["config", "--global", "core.longpaths", "true"], sandboxDir, undefined, undefined, options?.onLog);
+      }
+
       // ── 1. CLONING ──────────────────────────────────────────────────────────
       if (onStatusChange) await onStatusChange("CLONING");
       const branchArgs = options?.branch && options.branch !== "main" ? ["-b", options.branch] : [];
       logger.info(`📦 [BuildExecutor] Cloning ${repoUrl} (branch: ${options?.branch || "main"})...`);
-      await this.runCommand("git", ["clone", "--depth", "1", ...branchArgs, repoUrl, "."], sandboxDir);
+      options?.onLog?.(`$ git clone --depth 1 ${branchArgs.join(" ")} ${repoUrl}`);
+      await this.runCommand("git", ["clone", "--depth", "1", ...branchArgs, repoUrl, "."], sandboxDir, undefined, undefined, options?.onLog);
 
       // ── 2. DETECT BUILD DIRECTORY (smart monorepo + override support) ──────
       const { buildDir, isStaticSite } = await this.detectBuildDir(sandboxDir, options?.frontendDir);
@@ -404,7 +450,15 @@ export class BuildExecutorService {
       // npm skips devDependencies (vite, tsc, etc.) when NODE_ENV=production.
       if (onStatusChange) await onStatusChange("INSTALLING");
       logger.info(`📥 [BuildExecutor] Installing npm dependencies in: ${buildDir}...`);
-      await this.runCommand("npm", ["install", "--no-audit", "--include=dev"], buildDir, options?.envVars);
+      options?.onLog?.("$ npm install --no-audit --include=dev --legacy-peer-deps");
+      await this.runCommand(
+        "npm",
+        ["install", "--no-audit", "--include=dev", "--legacy-peer-deps"],
+        buildDir,
+        options?.envVars,
+        undefined,
+        options?.onLog
+      );
 
       // ── 4. BUILDING ──────────────────────────────────────────────────────
       // Detect build tool and inject relative-base flags (--base=./ for Vite,
@@ -414,7 +468,8 @@ export class BuildExecutorService {
       const { args: buildArgs, envOverrides } = await this.resolveBuildCommand(buildDir);
       const buildEnv = { ...(options?.envVars || {}), ...envOverrides };
       logger.info(`⚙️ [BuildExecutor] Running: npm ${buildArgs.join(" ")} in: ${buildDir}...`);
-      await this.runCommand("npm", buildArgs, buildDir, buildEnv, "production");
+      options?.onLog?.(`$ npm ${buildArgs.join(" ")}`);
+      await this.runCommand("npm", buildArgs, buildDir, buildEnv, "production", options?.onLog);
 
       // ── 5. LOCATE OUTPUT BUNDLE ──────────────────────────────────────────
       const outputDir = await this.detectOutputDir(buildDir);
