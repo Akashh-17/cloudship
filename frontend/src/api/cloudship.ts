@@ -97,6 +97,8 @@ export const cloudshipApi = {
 
   getGitHubLoginUrl: (): string => `${BASE_URL}/auth/github`,
 
+  getWebhookUrl: (): string => `${BASE_URL}/api/v1/webhooks/github`,
+
   // ── Logs ────────────────────────────────────────────────────────────────
   getLogDelta: (id: string, cursor: number): Promise<{ lines: string[]; cursor: number; done: boolean; status: Deployment["status"] }> =>
     request(`/api/v1/deployments/${id}/logs?cursor=${cursor}`),

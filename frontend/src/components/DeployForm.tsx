@@ -1,4 +1,8 @@
 import { useState } from "react";
+import { Plus, Minus, AlertCircle, Rocket } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { cloudshipApi } from "../api/cloudship";
 import type { Deployment } from "../api/cloudship";
 
@@ -71,10 +75,10 @@ export default function DeployForm({ onDeployed }: DeployFormProps) {
   };
 
   return (
-    <form onSubmit={handleSubmit}>
-      <div className="form-group">
-        <label htmlFor="repo">GitHub URL</label>
-        <input
+    <form onSubmit={handleSubmit} className="space-y-5">
+      <div className="space-y-2">
+        <Label htmlFor="repo">GitHub repository URL</Label>
+        <Input
           id="repo"
           type="text"
           placeholder="https://github.com/user/repo"
@@ -83,13 +87,12 @@ export default function DeployForm({ onDeployed }: DeployFormProps) {
           disabled={loading}
           autoFocus
         />
-        {error && <div className="error-text">{error}</div>}
       </div>
 
-      <div className="form-row">
-        <div className="form-group">
-          <label htmlFor="branch">Branch</label>
-          <input
+      <div className="grid grid-cols-2 gap-4">
+        <div className="space-y-2">
+          <Label htmlFor="branch">Branch</Label>
+          <Input
             id="branch"
             type="text"
             list="branch-suggestions"
@@ -105,12 +108,12 @@ export default function DeployForm({ onDeployed }: DeployFormProps) {
           </datalist>
         </div>
 
-        <div className="form-group">
-          <label htmlFor="frontendDir">Frontend Directory</label>
-          <input
+        <div className="space-y-2">
+          <Label htmlFor="frontendDir">Frontend directory</Label>
+          <Input
             id="frontendDir"
             type="text"
-            placeholder="./ (auto-detected)"
+            placeholder="./ (auto)"
             value={frontendDir}
             onChange={(e) => setFrontendDir(e.target.value)}
             disabled={loading}
@@ -118,9 +121,9 @@ export default function DeployForm({ onDeployed }: DeployFormProps) {
         </div>
       </div>
 
-      <div className="form-group">
-        <label htmlFor="slug">Custom URL (Optional)</label>
-        <input
+      <div className="space-y-2">
+        <Label htmlFor="slug">Custom URL (optional)</Label>
+        <Input
           id="slug"
           type="text"
           placeholder="something-unique"
@@ -130,42 +133,68 @@ export default function DeployForm({ onDeployed }: DeployFormProps) {
         />
       </div>
 
-      <div className="form-group">
-        <div className="env-header">
-          <label style={{ margin: 0 }}>Environment Variables</label>
-          <button type="button" className="btn btn-ghost btn-sm" onClick={addEnvVar} disabled={loading}>
-            + Add
-          </button>
+      <div className="space-y-2.5">
+        <div className="flex items-center justify-between">
+          <Label className="mb-0">Environment variables</Label>
+          <Button type="button" variant="ghost" size="sm" onClick={addEnvVar} disabled={loading} className="h-7 px-2.5 text-xs">
+            <Plus className="h-3.5 w-3.5" />
+            Add
+          </Button>
         </div>
 
-        {envVars.map((pair) => (
-          <div key={pair.id} className="env-row">
-            <input
-              type="text"
-              placeholder="Name"
-              value={pair.key}
-              onChange={(e) => updateEnvVar(pair.id, "key", e.target.value)}
-              disabled={loading}
-              style={{ flex: 1 }}
-            />
-            <input
-              type="text"
-              placeholder="Value"
-              value={pair.value}
-              onChange={(e) => updateEnvVar(pair.id, "value", e.target.value)}
-              disabled={loading}
-              style={{ flex: 1 }}
-            />
-            <button type="button" className="icon-btn" onClick={() => removeEnvVar(pair.id)} disabled={loading}>
-              −
-            </button>
+        {envVars.length > 0 && (
+          <div className="space-y-2">
+            {envVars.map((pair) => (
+              <div key={pair.id} className="flex gap-2">
+                <Input
+                  type="text"
+                  placeholder="NAME"
+                  value={pair.key}
+                  onChange={(e) => updateEnvVar(pair.id, "key", e.target.value)}
+                  disabled={loading}
+                  className="font-mono text-xs"
+                />
+                <Input
+                  type="text"
+                  placeholder="value"
+                  value={pair.value}
+                  onChange={(e) => updateEnvVar(pair.id, "value", e.target.value)}
+                  disabled={loading}
+                  className="font-mono text-xs"
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => removeEnvVar(pair.id)}
+                  disabled={loading}
+                  className="shrink-0 text-muted-foreground hover:text-destructive"
+                >
+                  <Minus className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            ))}
           </div>
-        ))}
+        )}
       </div>
 
-      <button type="submit" className="btn btn-primary" style={{ width: "100%" }} disabled={loading}>
-        {loading ? "Deploying…" : "Deploy"}
-      </button>
+      {error && (
+        <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3.5 py-2.5 text-sm text-destructive">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          {error}
+        </div>
+      )}
+
+      <Button type="submit" size="lg" className="w-full" disabled={loading}>
+        {loading ? (
+          "Deploying…"
+        ) : (
+          <>
+            <Rocket className="h-4 w-4" />
+            Deploy
+          </>
+        )}
+      </Button>
     </form>
   );
 }

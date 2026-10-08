@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { Zap } from "lucide-react";
-import { User } from "../api/cloudship";
+import { Button } from "@/components/ui/button";
+import type { User } from "@/api/cloudship";
 
 interface HeaderProps {
   user?: User | null;
@@ -9,33 +10,50 @@ interface HeaderProps {
 
 export default function Header({ user, onLogout }: HeaderProps) {
   return (
-    <div className="site-header">
-      <header className="site-header-inner">
-        <Link to="/" className="brand">
-          <span className="brand-mark">
-            <Zap size={14} strokeWidth={2.5} fill="currentColor" />
+    <header className="sticky top-0 z-40 w-full border-b border-white/5 bg-background/70 backdrop-blur-lg">
+      <div className="container flex h-16 items-center justify-between">
+        <Link to="/" className="flex items-center gap-2 font-display text-[15px] font-semibold tracking-tight">
+          <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-primary">
+            <Zap className="h-3.5 w-3.5 fill-white text-white" strokeWidth={2.5} />
           </span>
           CloudShip
         </Link>
 
-        <div className="nav-actions">
+        <nav className="flex items-center gap-8 text-sm text-muted-foreground">
+          <a href="#how-it-works" className="transition-colors hover:text-foreground">
+            How it works
+          </a>
+          <a href="#features" className="transition-colors hover:text-foreground">
+            Features
+          </a>
+        </nav>
+
+        <div className="flex items-center gap-3">
           {user ? (
             <>
-              <div className="user-chip">
-                {user.avatarUrl && <img src={user.avatarUrl} alt={user.login} />}
-                {user.login}
+              <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 py-1 pl-1 pr-3 text-sm">
+                {user.avatarUrl && <img src={user.avatarUrl} alt={user.login} className="h-6 w-6 rounded-full" />}
+                <span className="font-medium">{user.login}</span>
               </div>
-              <button className="btn btn-ghost btn-sm" onClick={onLogout}>
+              <Button variant="ghost" size="sm" onClick={onLogout}>
                 Log out
-              </button>
+              </Button>
+              <Button asChild size="sm">
+                <Link to="/app">Dashboard</Link>
+              </Button>
             </>
           ) : (
-            <Link to="/login" className="btn btn-primary btn-sm btn-pill">
-              Sign in with GitHub
-            </Link>
+            <>
+              <Button asChild variant="ghost" size="sm">
+                <Link to="/login">Log in</Link>
+              </Button>
+              <Button asChild size="sm">
+                <Link to="/login">Sign up</Link>
+              </Button>
+            </>
           )}
         </div>
-      </header>
-    </div>
+      </div>
+    </header>
   );
 }
