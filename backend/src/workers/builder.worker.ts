@@ -57,6 +57,16 @@ async function processJob(message: Message) {
     return;
   }
 
+  // A redelivered message (a previous attempt was interrupted mid-build —
+  // worker crash/restart, expired visibility timeout) leaves the deployment
+  // parked in a non-QUEUED, non-terminal status. The build always restarts
+  // from CLONING, so the status record must be reset to QUEUED first or the
+  // very first status transition of this attempt is rejected as invalid.
+  if (existingDeployment.status !== DeploymentStatus.QUEUED) {
+    logger.warn(`⚠️ [Worker] [${deploymentId}] Retrying a build stuck at ${existingDeployment.status} — resetting to QUEUED.`);
+    await deploymentService.restartForRetry(deploymentId);
+  }
+
   // Start Visibility Heartbeat timer (every 25 seconds extend SQS visibility by 60 seconds)
   const heartbeatInterval = setInterval(async () => {
     logger.info(`💓 [Worker] [${deploymentId}] Heartbeat ping extending SQS visibility timeout...`);

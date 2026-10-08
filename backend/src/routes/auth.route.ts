@@ -5,6 +5,10 @@ import { success, failure } from "../utils/apiResponse";
 
 const router = Router();
 
+// CSRF protection for the OAuth redirect (a random per-request state value,
+// stored in the session and verified on callback) is enabled via `state:
+// true` on the GitHubStrategy constructor in github.strategy.ts — that's
+// where passport-oauth2 actually reads it, not here.
 router.get("/github", passport.authenticate("github", { scope: ["user:email"] }));
 
 router.get(

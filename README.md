@@ -27,6 +27,8 @@ CloudShip is an automated web deployment platform inspired by Vercel. It allows 
 - 🛠️ **Custom Build Configuration**: Support for custom branch selection, directory overrides, custom slugs, and build-time environment variables.
 - 📺 **Retro CRT Terminal & Stepper**: Real-time visual progress tracker (`QUEUED` ➔ `CLONING` ➔ `INSTALLING` ➔ `BUILDING` ➔ `UPLOADING` ➔ `SUCCESS`) paired with a live timestamped terminal output console.
 - 🔗 **Clean Reverse Proxy**: Serves deployed static sites securely without exposed raw bucket URLs.
+- 🔐 **Sign in with GitHub**: OAuth login via Passport, backed by server-side sessions (DynamoDB-backed store, httpOnly cookies — no tokens ever touch the browser). Every deployment is scoped to its owner.
+- 🔁 **Push-to-Deploy Webhooks**: Once a repo/branch has been deployed at least once through the dashboard, a GitHub webhook on that repo will trigger an automatic redeploy on every push — same live URL, no manual re-trigger needed.
 
 ---
 
@@ -67,7 +69,22 @@ CloudShip is an automated web deployment platform inspired by Vercel. It allows 
    SQS_QUEUE_URL=https://sqs.ap-south-1.amazonaws.com/xxx/cloudship-deployments-queue
    S3_BUCKET_NAME=cloudship-deployments-bucket-xxx
    DYNAMODB_TABLE_NAME=cloudship-deployments
+   USERS_TABLE_NAME=cloudship-users
+   SESSION_TABLE_NAME=cloudship-sessions
+
+   # GitHub OAuth (create an OAuth App at github.com/settings/developers,
+   # callback URL: http://localhost:3000/auth/github/callback)
+   GITHUB_CLIENT_ID=your_oauth_client_id
+   GITHUB_CLIENT_SECRET=your_oauth_client_secret
+   SESSION_SECRET=replace_with_a_long_random_string
+   FRONTEND_URL=http://localhost:5173
+
+   # Push-to-deploy webhook (any random string; also entered as the webhook's
+   # secret on GitHub — see "Setting Up Push-to-Deploy" below)
+   GITHUB_WEBHOOK_SECRET=your_webhook_secret
    ```
+
+   See [`backend/.env.example`](./backend/.env.example) for the full list of options.
 
 3. **Start the API Server**
 
@@ -91,6 +108,18 @@ CloudShip is an automated web deployment platform inspired by Vercel. It allows 
    npm run dev
    ```
    Open `http://localhost:5173` in your browser.
+
+---
+
+## 🔁 Setting Up Push-to-Deploy
+
+1. Deploy a repo/branch once through the dashboard (this establishes the CloudShip project CloudShip will redeploy on future pushes).
+2. On GitHub, go to the repo's **Settings → Webhooks → Add webhook**.
+3. Set **Payload URL** to `<your API URL>/api/v1/webhooks/github`, **Content type** to `application/json`, and **Secret** to the same value as the backend's `GITHUB_WEBHOOK_SECRET` env var.
+4. Select just the **push** event.
+5. Push to the branch — CloudShip verifies the webhook's HMAC signature, looks up the most recent deployment for that exact repo + branch, and redeploys it to the same live URL.
+
+The deployment detail page also shows these values for the exact repo you're viewing.
 
 ---
 

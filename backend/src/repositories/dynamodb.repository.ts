@@ -1,4 +1,4 @@
-import { PutCommand, GetCommand, UpdateCommand, QueryCommand, DeleteCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
+import { PutCommand, GetCommand, UpdateCommand, QueryCommand, ScanCommand, DeleteCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { docClient } from "../aws/config";
 import { env } from "../config/env";
 import { Deployment } from "../types/deployment";
@@ -35,7 +35,7 @@ function toDeployment(item: Record<string, any>): Deployment {
 export class DynamoDBDeploymentRepository implements IDeploymentRepository {
   private tableName = env.DYNAMODB_TABLE_NAME;
 
-  async save(deployment: Deployment): Promise<Deployment> {
+  async save(deployment: Deployment, options: { overwriteSlug?: boolean } = {}): Promise<Deployment> {
     const item = {
       ...deployment,
       createdAt: deployment.createdAt.toISOString(),
@@ -55,7 +55,9 @@ export class DynamoDBDeploymentRepository implements IDeploymentRepository {
           Put: {
             TableName: this.tableName,
             Item: { id: `slug#${deployment.customSlug}`, deploymentId: deployment.id, type: "SLUG_RESERVATION" },
-            ConditionExpression: "attribute_not_exists(id)",
+            // A redeploy of a project that already owns this slug re-points the
+            // reservation instead of requiring the slug to be unclaimed.
+            ...(options.overwriteSlug ? {} : { ConditionExpression: "attribute_not_exists(id)" }),
           },
         });
       }
@@ -70,7 +72,13 @@ export class DynamoDBDeploymentRepository implements IDeploymentRepository {
 
   async findById(id: string): Promise<Deployment | null> {
     try {
-      const response = await docClient.send(new GetCommand({ TableName: this.tableName, Key: { id } }));
+      // Strongly consistent read: this record is read-modify-written with
+      // optimistic concurrency (statusVersion) in tight succession by the
+      // worker (status transitions every few seconds, heartbeat pings).
+      // DynamoDB's default eventually-consistent read can return a
+      // pre-write value milliseconds after that write committed, which
+      // surfaces as a spurious ConditionalCheckFailedException here.
+      const response = await docClient.send(new GetCommand({ TableName: this.tableName, Key: { id }, ConsistentRead: true }));
       if (!response.Item) return null;
       return toDeployment(response.Item);
     } catch (error: any) {
@@ -162,6 +170,34 @@ export class DynamoDBDeploymentRepository implements IDeploymentRepository {
     } catch (error: any) {
       logger.error(error, `❌ [DynamoDB] Failed to query deployments for user ${userId}`);
       throw new AppError(503, "Failed to list deployments — database unavailable");
+    }
+  }
+
+  /**
+   * Looks up the most recent deployment for a given repo+branch so an
+   * incoming GitHub push webhook can redeploy an existing project. This
+   * table has no repoUrl index, so it scans and filters — acceptable at
+   * portfolio scale; a `repoUrl-branch-index` GSI would replace this if
+   * the deployment volume ever grew large enough to matter.
+   */
+  async findLatestByRepo(repoUrl: string, branch: string): Promise<Deployment | null> {
+    try {
+      const response = await docClient.send(
+        new ScanCommand({
+          TableName: this.tableName,
+          FilterExpression: "repoUrl = :repoUrl AND branch = :branch",
+          ExpressionAttributeValues: { ":repoUrl": repoUrl, ":branch": branch },
+        })
+      );
+
+      const items = (response.Items || []).filter((item) => !item.type);
+      if (items.length === 0) return null;
+
+      items.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+      return toDeployment(items[0]);
+    } catch (error: any) {
+      logger.error(error, `❌ [DynamoDB] Failed to scan for repo ${repoUrl} (${branch})`);
+      throw new AppError(503, "Failed to look up deployment — database unavailable");
     }
   }
 

@@ -37,6 +37,14 @@ if (env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET) {
         clientID: env.GITHUB_CLIENT_ID,
         clientSecret: env.GITHUB_CLIENT_SECRET,
         callbackURL: env.GITHUB_CALLBACK_URL || `http://localhost:${env.PORT}/auth/github/callback`,
+        // passport-oauth2 only enables its session-backed state-nonce store
+        // (CSRF protection for the OAuth redirect) when `state` is set here,
+        // at strategy construction time — passing it to authenticate() alone
+        // has no effect, since _stateStore is chosen in the constructor.
+        // @types/passport-github2 types `state` as string-only, which is
+        // stale relative to what passport-oauth2 accepts at runtime (any
+        // truthy value enables the store) — hence the cast.
+        state: true as unknown as string,
       },
       (_accessToken: string, _refreshToken: string, profile: Profile, done: (err: any, user?: User) => void) => {
         upsertUser(profile)

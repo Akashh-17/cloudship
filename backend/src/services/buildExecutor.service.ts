@@ -371,6 +371,11 @@ export class BuildExecutorService {
     const entries = await fs.readdir(dir, { withFileTypes: true });
 
     for (const entry of entries) {
+      // Never serve VCS internals — matters most for the static-site path,
+      // which collects straight from the cloned repo root instead of a
+      // build tool's output directory.
+      if (entry.isDirectory() && entry.name === ".git") continue;
+
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         const subFiles = await this.collectFiles(fullPath, baseDir, deploymentId);
@@ -490,7 +495,11 @@ export class BuildExecutorService {
       };
     } finally {
       try {
-        await fs.rm(sandboxDir, { recursive: true, force: true });
+        // On Windows, git/npm child processes can hold file handles open for
+        // a few hundred ms after their `exit` event fires, which turns an
+        // immediate recursive delete into a transient EBUSY/ENOTEMPTY. These
+        // options make fs.rm retry with backoff instead of failing outright.
+        await fs.rm(sandboxDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
         logger.info(`🧹 [BuildExecutor] Cleaned up sandbox: ${sandboxDir}`);
       } catch (cleanupErr) {
         logger.error(cleanupErr, `Failed to delete sandbox: ${sandboxDir}`);

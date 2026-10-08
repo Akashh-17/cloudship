@@ -74,11 +74,9 @@ export class S3Service {
   }
 
   getPublicUrl(deploymentId: string, filename: string = ""): string {
-    if (env.CLOUDFRONT_DOMAIN) {
-      const cleanDomain = env.CLOUDFRONT_DOMAIN.replace(/^https?:\/\//, "").replace(/\/+$/, "");
-      const pathSuffix = filename ? `/${filename.replace(/^\/+/, "")}` : "";
-      return `https://${cleanDomain}/sites/${deploymentId}${pathSuffix}`;
-    }
+    // Sites are served by this server's own /sites/:id reverse proxy
+    // (siteProxy.route.ts) — there is no CDN in front of it, so the live
+    // URL is always this server's own public address.
     const baseUrl = process.env.PUBLIC_API_URL || "http://localhost:3000";
     const pathSuffix = filename ? `/${filename.replace(/^\/+/, "")}` : "";
     return `${baseUrl.replace(/\/+$/, "")}/sites/${deploymentId}${pathSuffix}`;

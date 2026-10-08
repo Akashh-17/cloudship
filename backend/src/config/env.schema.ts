@@ -9,8 +9,6 @@ export const envSchema = z.object({
   DYNAMODB_TABLE_NAME: z.string().default("cloudship-deployments"),
   USERS_TABLE_NAME: z.string().default("cloudship-users"),
   SESSION_TABLE_NAME: z.string().default("cloudship-sessions"),
-  ARTIFACT_BUCKET_NAME: z.string().optional(),
-  CLOUDFRONT_DOMAIN: z.string().optional(),
 
   // ── Security & CORS ──────────────────────────────────────────────────────
   ALLOWED_ORIGINS: z.string().default("http://localhost:5173"),
@@ -19,7 +17,6 @@ export const envSchema = z.object({
 
   // ── Worker ────────────────────────────────────────────────────────────────
   WORKER_CONCURRENCY: z.coerce.number().default(3),
-  CODEBUILD_PROJECT_NAME: z.string().optional(),
 
   // ── GitHub OAuth ──────────────────────────────────────────────────────────
   GITHUB_CLIENT_ID: z.string().optional(),

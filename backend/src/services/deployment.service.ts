@@ -8,10 +8,13 @@ import { IDeploymentRepository } from "../repositories/deployment.repository.int
 import { DynamoDBDeploymentRepository } from "../repositories/dynamodb.repository";
 import { DeploymentInput } from "../schemas/deployment.schema";
 
-// State machine: defines which transitions are valid for each status
+// State machine: defines which transitions are valid for each status.
+// CLONING can go straight to UPLOADING because buildExecutorService skips
+// INSTALLING/BUILDING entirely for a repo with no package.json (static
+// HTML sites) — see BuildExecutorService.executeBuild's static-site branch.
 const VALID_TRANSITIONS: Record<DeploymentStatus, DeploymentStatus[]> = {
   [DeploymentStatus.QUEUED]:     [DeploymentStatus.CLONING,    DeploymentStatus.FAILED],
-  [DeploymentStatus.CLONING]:    [DeploymentStatus.INSTALLING, DeploymentStatus.FAILED],
+  [DeploymentStatus.CLONING]:    [DeploymentStatus.INSTALLING, DeploymentStatus.UPLOADING, DeploymentStatus.FAILED],
   [DeploymentStatus.INSTALLING]: [DeploymentStatus.BUILDING,   DeploymentStatus.FAILED],
   [DeploymentStatus.BUILDING]:   [DeploymentStatus.UPLOADING,  DeploymentStatus.FAILED],
   [DeploymentStatus.UPLOADING]:  [DeploymentStatus.SUCCESS,    DeploymentStatus.FAILED],
@@ -29,7 +32,11 @@ export class DeploymentService {
     return await this.repository.listByUser(userId);
   }
 
-  async createDeployment(input: DeploymentInput, userId: string): Promise<Deployment> {
+  async createDeployment(
+    input: DeploymentInput,
+    userId: string,
+    options: { overwriteSlug?: boolean } = {}
+  ): Promise<Deployment> {
     const id = generateDeploymentID();
 
     const newDeployment: Deployment = {
@@ -49,7 +56,7 @@ export class DeploymentService {
     };
 
     // Save to persistent database
-    await this.repository.save(newDeployment);
+    await this.repository.save(newDeployment, options);
 
     // Asynchronously publish deployment job to SQS queue
     try {
@@ -64,6 +71,30 @@ export class DeploymentService {
     }
 
     return newDeployment;
+  }
+
+  /**
+   * Binds an incoming GitHub push webhook to an existing CloudShip project by
+   * finding the most recent deployment for the same repo+branch and
+   * redeploying it under its original owner and settings (slug, env vars,
+   * frontend dir). Returns null when the repo has never been deployed
+   * through CloudShip, so the webhook has nothing to bind to yet.
+   */
+  async redeployFromRepoPush(repoUrl: string, branch: string): Promise<Deployment | null> {
+    const previous = await this.repository.findLatestByRepo(repoUrl, branch);
+    if (!previous) return null;
+
+    return this.createDeployment(
+      {
+        repoUrl,
+        branch,
+        frontendDir: previous.frontendDir || "./",
+        customSlug: previous.customSlug,
+        envVars: previous.envVars,
+      },
+      previous.userId,
+      { overwriteSlug: Boolean(previous.customSlug) }
+    );
   }
 
   async getDeploymentStatus(id: string): Promise<Deployment> {
@@ -95,6 +126,15 @@ export class DeploymentService {
       throw new AppError(404, "Deployment not found");
     }
 
+    // A no-op: some build paths (e.g. the static-site branch in
+    // BuildExecutorService, which sets UPLOADING itself) and the worker's
+    // own subsequent call can legitimately report the same status twice.
+    // Treat that as idempotent rather than an invalid transition.
+    if (newStatus === deployment.status) {
+      if (!liveUrl) return deployment;
+      return await this.repository.updateStatus(id, newStatus, { liveUrl, expectedVersion: expectedVersion ?? deployment.statusVersion });
+    }
+
     const allowedTransitions = VALID_TRANSITIONS[deployment.status];
 
     if (!allowedTransitions.includes(newStatus)) {
@@ -105,6 +145,23 @@ export class DeploymentService {
     }
 
     return await this.repository.updateStatus(id, newStatus, { liveUrl, expectedVersion: expectedVersion ?? deployment.statusVersion });
+  }
+
+  /**
+   * Resets a deployment back to QUEUED, bypassing the normal transition
+   * table. Used only when the worker picks up a redelivered SQS message
+   * (ApproximateReceiveCount > 1) for a deployment that got stuck mid-build
+   * on a previous, interrupted attempt (worker crash/restart, expired
+   * visibility timeout, etc.) — the retried build always restarts from
+   * CLONING, so the status record must go back to QUEUED first or that
+   * first onStatusChange("CLONING") call fails as an invalid transition.
+   */
+  async restartForRetry(id: string): Promise<Deployment> {
+    const deployment = await this.getDeploymentStatus(id);
+    if (deployment.status === DeploymentStatus.QUEUED) return deployment;
+    return await this.repository.updateStatus(id, DeploymentStatus.QUEUED, {
+      expectedVersion: deployment.statusVersion,
+    });
   }
 
   async deleteDeployment(id: string, userId: string): Promise<void> {

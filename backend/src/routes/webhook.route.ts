@@ -58,10 +58,22 @@ router.post(
       return res.status(400).json(failure("Repository rejected: " + parsed.error.message));
     }
 
-    logger.info(`[Webhook] Push received for ${repoUrl} (${branch}) — triggering deployment`);
-    // A webhook must be associated with an owner before it can deploy. This
-    // portfolio release deliberately does not accept global, ownerless pushes.
-    return res.status(403).json(failure("No owner-bound webhook subscription exists for this repository"));
+    logger.info(`[Webhook] Push received for ${repoUrl} (${branch}) — looking up linked project`);
+
+    // Push-to-redeploy binds to whichever CloudShip project most recently
+    // deployed this exact repo+branch — there is no separate webhook
+    // subscription table, so a repo must be deployed once through the
+    // dashboard before pushes to it will trigger anything.
+    const deployment = await deploymentService.redeployFromRepoPush(repoUrl, branch);
+    if (!deployment) {
+      logger.info(`[Webhook] No CloudShip project is linked to ${repoUrl} (${branch}) — ignoring`);
+      return res.status(200).json(
+        success(null, "No CloudShip project has deployed this repository/branch yet. Deploy it once via the dashboard to enable push-to-deploy.")
+      );
+    }
+
+    logger.info(`[Webhook] Redeploying ${deployment.id} for ${repoUrl} (${branch})`);
+    return res.status(202).json(success(deployment, "Redeployment queued"));
   }
 );
 
